@@ -1,5 +1,6 @@
 import time
 import random
+import select
 
 import numpy as np
 from PIL import Image, ImageFont, ImageDraw
@@ -17,7 +18,6 @@ DISP_H = 7
 FONT_PATH = "nes-arcade-font-2-1-monospaced.ttf"
 FONT_SIZE = 7
 
-SCROLL_STEP = 1
 INPUT_DEVICE = "/dev/input/event0"
 INPUT_KEY = "KEY_B"
 
@@ -92,15 +92,6 @@ def roll_transition(old_frame, new_frame):
     _send_packets(packets)
 
 
-def scroll_text(arr):
-    padded = np.pad(arr, ((0, 0), (DISP_W, DISP_W)))
-    packets = [
-        _frame_to_packet(padded[:, i:i + DISP_W])
-        for i in range(0, arr.shape[1] + DISP_W, SCROLL_STEP)
-    ]
-    _send_packets(packets)
-
-
 current_frame = np.zeros((DISP_H, DISP_W), dtype=np.uint8)
 
 
@@ -109,32 +100,44 @@ def display(text, animate=False):
     arr = text_to_pixels(text)
     if arr.shape[1] <= DISP_W:
         new_frame = np.pad(arr, ((0, 0), (0, DISP_W - arr.shape[1]))).astype(np.uint8)
-        if animate:
-            roll_transition(current_frame, new_frame)
-        else:
-            send_frame(new_frame)
-        current_frame = new_frame
     else:
-        if animate:
-            roll_transition(current_frame, np.zeros_like(current_frame))
-        scroll_text(arr)
-        current_frame[:] = 0
+        new_frame = arr[:, :DISP_W].astype(np.uint8)
+    if animate:
+        roll_transition(current_frame, new_frame)
+    else:
+        send_frame(new_frame)
+    current_frame = new_frame
 
 
 with open("words.txt") as f:
     WORDS = [line.strip() for line in f if line.strip()]
 
 
+IDLE_TEXT = "tits 4 ..."
+WORD_DURATION = 5.0
+
+
 if __name__ == "__main__":
     dev = InputDevice(INPUT_DEVICE)
     print(f"Listening on: {dev.name}")
 
-    display(random.choice(WORDS))
+    display(IDLE_TEXT)
+    word_until = None
 
-    for event in dev.read_loop():
-        if event.type == ecodes.EV_KEY:
-            key_event = categorize(event)
-            if key_event.keycode == INPUT_KEY and key_event.keystate == key_event.key_down:
-                text = random.choice(WORDS)
-                print(f"Pedal pressed: {text}")
-                display(text, animate=True)
+    while True:
+        timeout = None if word_until is None else max(0.0, word_until - time.monotonic())
+        r, _, _ = select.select([dev.fd], [], [], timeout)
+
+        if not r:
+            display(IDLE_TEXT, animate=True)
+            word_until = None
+            continue
+
+        for event in dev.read():
+            if event.type == ecodes.EV_KEY:
+                key_event = categorize(event)
+                if key_event.keycode == INPUT_KEY and key_event.keystate == key_event.key_down:
+                    text = random.choice(WORDS)
+                    print(f"Pedal pressed: {text}")
+                    display(text, animate=True)
+                    word_until = time.monotonic() + WORD_DURATION
